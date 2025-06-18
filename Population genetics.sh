@@ -1,11 +1,5 @@
 #!/bin/bash
 
-# =============================================================================
-# Whole Genome Resequencing Analysis Pipeline
-# Replicating methods from E. rhadinum and E. tetradactylum study
-# =============================================================================
-
-# Set up variables
 REFERENCE_GENOME="E_rhadinum_reference.fasta"
 OUTGROUP_SRA="SRR11793813"
 THREADS=16
