@@ -285,4 +285,295 @@ with open(orthogroups_file, 'r') as f:
     header = f.readline().strip().split('\t')
     species_cols = {header[i]: i for i in range(1, len(header))}
     
-    # Open
+    # Open output file for CAFE
+    with open("${OUTPUT_DIR}/cafe/cafe_input.txt", 'w') as out_f:
+        # Write header
+        out_f.write("Desc\tFamily ID\t" + "\t".join([sp for sp in header[1:]]) + "\n")
+        
+        # Write gene counts per family
+        family_id = 1
+        for line in f:
+            parts = line.strip().split('\t')
+            og_id = parts[0]
+            counts = []
+            
+            for species in header[1:]:
+                idx = species_cols[species]
+                if idx < len(parts) and parts[idx]:
+                    # Count genes in this species for this orthogroup
+                    gene_count = len(parts[idx].split(', '))
+                else:
+                    gene_count = 0
+                counts.append(str(gene_count))
+            
+            out_f.write(f"{og_id}\tFamily{family_id}\t" + "\t".join(counts) + "\n")
+            family_id += 1
+EOF
+
+# Create CAFE control file
+cat > ${OUTPUT_DIR}/cafe/cafe.ctl << EOF
+#CAFE input file
+tree (((((((((E_rhadinum:_,E_tetradactylum:_):_,L_calcarifer:_):_,(((C_melampygus:_,E_naucrates:_):_,S_dumerili:_):_,T_jaculatrix:_):_):_,M_salmoides:_):_,E_lanceolatus:_):_,B_splendens:_):_,((C_semilaevis:_,P_olivaceus:_):_,H_stenolepis:_):_):_,C_lumpus:_):_,O_latipes:_):_,D_rerio:_,L_oculatus:_);
+
+# Lambda (family-wide rate of gene gain/loss)
+lambda -s
+
+# Input data file
+load -i ${OUTPUT_DIR}/cafe/cafe_input.txt -p 0.05 -t 10
+
+# Report results
+report ${OUTPUT_DIR}/cafe/cafe_results
+EOF
+
+# Update the tree in the control file with the actual divergence times
+python - << EOF
+import re
+
+# Read the time tree file
+with open("${OUTPUT_DIR}/timetree/mcmctree_output.tre", 'r') as f:
+    time_tree = f.read().strip()
+
+# Read CAFE control file
+with open("${OUTPUT_DIR}/cafe/cafe.ctl", 'r') as f:
+    cafe_ctl = f.read()
+
+# Extract the tree structure from CAFE file
+tree_pattern = r'tree \(.*?\);'
+tree_match = re.search(tree_pattern, cafe_ctl, re.DOTALL)
+if tree_match:
+    cafe_tree = tree_match.group(0)
+    
+    # Replace placeholder branch lengths with divergence times
+    time_tree = time_tree.replace(';', '')  # Remove semicolon
+    species = ["E_rhadinum", "E_tetradactylum", "L_calcarifer", "C_melampygus", 
+               "E_naucrates", "S_dumerili", "T_jaculatrix", "M_salmoides", 
+               "E_lanceolatus", "B_splendens", "C_semilaevis", "P_olivaceus", 
+               "H_stenolepis", "C_lumpus", "O_latipes", "D_rerio", "L_oculatus"]
+    
+    # Parse divergence times and update CAFE tree
+    updated_tree = cafe_tree
+    for sp in species:
+        for match in re.finditer(f'{sp}:_', updated_tree):
+            # Find the corresponding time in time_tree
+            sp_pattern = f'{sp}:(\\d+\\.\\d+)'
+            sp_time_match = re.search(sp_pattern, time_tree)
+            if sp_time_match:
+                time_value = sp_time_match.group(1)
+                updated_tree = updated_tree.replace(f'{sp}:_', f'{sp}:{time_value}')
+    
+    # Update internal branches
+    internal_pattern = r'):_'
+    for match in re.finditer(internal_pattern, updated_tree):
+        # We need a more sophisticated approach here to match internal nodes
+        # This is a simplified placeholder
+        updated_tree = updated_tree.replace('):_', '):0.1')
+    
+    # Replace tree in CAFE control file
+    updated_cafe_ctl = cafe_ctl.replace(cafe_tree, updated_tree)
+    
+    # Write updated CAFE control file
+    with open("${OUTPUT_DIR}/cafe/cafe.ctl", 'w') as f:
+        f.write(updated_cafe_ctl)
+EOF
+
+# Run CAFE analysis
+cd ${OUTPUT_DIR}/cafe
+cafe cafe.ctl
+
+# Step 8: Analyze CAFE results and perform enrichment analysis
+echo "Step 8: Analyzing gene family evolution results"
+mkdir -p ${OUTPUT_DIR}/cafe/enrichment
+
+# Extract significantly expanded/contracted gene families
+python - << EOF
+import os
+import re
+
+# Parse CAFE results
+results_file = "${OUTPUT_DIR}/cafe/cafe_results.cafe"
+expanded_families = {}
+contracted_families = {}
+
+with open(results_file, 'r') as f:
+    for line in f:
+        if line.startswith('Final'):
+            parts = line.strip().split('\t')
+            family_id = parts[1]
+            pvalue = float(parts[2])
+            
+            if pvalue <= 0.05:  # Significant change
+                # Extract species-specific expansions/contractions
+                for species_info in parts[3:]:
+                    if '<' in species_info or '>' in species_info:
+                        species, change = species_info.split('(')
+                        species = species.strip()
+                        
+                        # Extract direction and magnitude
+                        if '+' in change:  # Expansion
+                            if species not in expanded_families:
+                                expanded_families[species] = []
+                            expanded_families[species].append(family_id)
+                        elif '-' in change:  # Contraction
+                            if species not in contracted_families:
+                                contracted_families[species] = []
+                            contracted_families[species].append(family_id)
+
+# Write expanded/contracted families for each species
+for species, families in expanded_families.items():
+    with open(f"${OUTPUT_DIR}/cafe/enrichment/{species}_expanded.txt", 'w') as f:
+        for family in families:
+            f.write(f"{family}\n")
+
+for species, families in contracted_families.items():
+    with open(f"${OUTPUT_DIR}/cafe/enrichment/{species}_contracted.txt", 'w') as f:
+        for family in families:
+            f.write(f"{family}\n")
+
+# Focus on E. rhadinum
+er_expanded = expanded_families.get('E_rhadinum', [])
+er_contracted = contracted_families.get('E_rhadinum', [])
+
+print(f"E. rhadinum has {len(er_expanded)} significantly expanded gene families and {len(er_contracted)} significantly contracted gene families.")
+EOF
+
+# Perform GO and KEGG enrichment analysis for E. rhadinum
+mkdir -p ${OUTPUT_DIR}/cafe/enrichment/E_rhadinum
+
+# Extract gene IDs for the significantly changed families
+python - << EOF
+import os
+
+# Path to OrthoFinder results and gene family lists
+orthogroups_file = "${OUTPUT_DIR}/orthofinder/Results_*/Orthogroups/Orthogroups.tsv"
+expanded_file = "${OUTPUT_DIR}/cafe/enrichment/E_rhadinum_expanded.txt"
+contracted_file = "${OUTPUT_DIR}/cafe/enrichment/E_rhadinum_contracted.txt"
+
+# Read expanded and contracted family IDs
+expanded_families = []
+if os.path.exists(expanded_file):
+    with open(expanded_file, 'r') as f:
+        expanded_families = [line.strip() for line in f]
+
+contracted_families = []
+if os.path.exists(contracted_file):
+    with open(contracted_file, 'r') as f:
+        contracted_families = [line.strip() for line in f]
+
+# Map family IDs to OrthoFinder OG IDs
+family_to_og = {}
+with open("${OUTPUT_DIR}/cafe/cafe_input.txt", 'r') as f:
+    next(f)  # Skip header
+    for line in f:
+        parts = line.strip().split('\t')
+        og_id = parts[0]
+        family_id = parts[1]
+        family_to_og[family_id] = og_id
+
+# Extract genes from expanded and contracted families
+expanded_genes = []
+contracted_genes = []
+
+with open(orthogroups_file, 'r') as f:
+    header = f.readline().strip().split('\t')
+    er_idx = header.index('E_rhadinum')
+    
+    for line in f:
+        parts = line.strip().split('\t')
+        og_id = parts[0]
+        
+        # Check if this OG belongs to a significantly changed family
+        for family_id, og in family_to_og.items():
+            if og == og_id:
+                if family_id in expanded_families and er_idx < len(parts):
+                    genes = parts[er_idx].split(', ')
+                    expanded_genes.extend(genes)
+                elif family_id in contracted_families and er_idx < len(parts):
+                    genes = parts[er_idx].split(', ')
+                    contracted_genes.extend(genes)
+                break
+
+# Write gene lists for enrichment analysis
+with open("${OUTPUT_DIR}/cafe/enrichment/E_rhadinum/expanded_genes.txt", 'w') as f:
+    for gene in expanded_genes:
+        f.write(f"{gene}\n")
+
+with open("${OUTPUT_DIR}/cafe/enrichment/E_rhadinum/contracted_genes.txt", 'w') as f:
+    for gene in contracted_genes:
+        f.write(f"{gene}\n")
+EOF
+
+# Run GO enrichment analysis
+Rscript - << EOF
+library(clusterProfiler)
+library(org.Dr.eg.db)  # Using zebrafish as reference (adjust as needed)
+
+# Read gene lists
+expanded_genes <- readLines("${OUTPUT_DIR}/cafe/enrichment/E_rhadinum/expanded_genes.txt")
+contracted_genes <- readLines("${OUTPUT_DIR}/cafe/enrichment/E_rhadinum/contracted_genes.txt")
+
+# Read all genes as background
+all_genes <- unique(readLines("${OUTPUT_DIR}/maker/erhadinum_genes.list"))
+
+# Map to gene symbols (this would need adjustment for your actual gene IDs)
+# This is an example assuming zebrafish homology mapping exists
+gene_mapping <- read.delim("${WORKING_DIR}/gene_mappings/erhadinum_to_zebrafish.tsv", 
+                           header=TRUE, stringsAsFactors=FALSE)
+
+expanded_entrez <- gene_mapping$zebrafish_entrez[gene_mapping$erhadinum_gene %in% expanded_genes]
+contracted_entrez <- gene_mapping$zebrafish_entrez[gene_mapping$erhadinum_gene %in% contracted_genes]
+all_entrez <- gene_mapping$zebrafish_entrez[gene_mapping$erhadinum_gene %in% all_genes]
+
+# GO enrichment for expanded genes
+if(length(expanded_entrez) > 0) {
+  ego_expanded <- enrichGO(gene = expanded_entrez,
+                         universe = all_entrez,
+                         OrgDb = org.Dr.eg.db,
+                         ont = "ALL",
+                         pAdjustMethod = "BH",
+                         pvalueCutoff = 0.05,
+                         qvalueCutoff = 0.05)
+  
+  write.csv(as.data.frame(ego_expanded), 
+            "${OUTPUT_DIR}/cafe/enrichment/E_rhadinum/expanded_GO_enrichment.csv")
+}
+
+# GO enrichment for contracted genes
+if(length(contracted_entrez) > 0) {
+  ego_contracted <- enrichGO(gene = contracted_entrez,
+                           universe = all_entrez,
+                           OrgDb = org.Dr.eg.db,
+                           ont = "ALL",
+                           pAdjustMethod = "BH",
+                           pvalueCutoff = 0.05,
+                           qvalueCutoff = 0.05)
+  
+  write.csv(as.data.frame(ego_contracted), 
+            "${OUTPUT_DIR}/cafe/enrichment/E_rhadinum/contracted_GO_enrichment.csv")
+}
+
+# KEGG pathway enrichment for expanded genes
+if(length(expanded_entrez) > 0) {
+  ekegg_expanded <- enrichKEGG(gene = expanded_entrez,
+                             organism = 'dre',  # zebrafish KEGG organism code
+                             universe = all_entrez,
+                             pAdjustMethod = "BH",
+                             pvalueCutoff = 0.05)
+  
+  write.csv(as.data.frame(ekegg_expanded), 
+            "${OUTPUT_DIR}/cafe/enrichment/E_rhadinum/expanded_KEGG_enrichment.csv")
+}
+
+# KEGG pathway enrichment for contracted genes
+if(length(contracted_entrez) > 0) {
+  ekegg_contracted <- enrichKEGG(gene = contracted_entrez,
+                               organism = 'dre',  # zebrafish KEGG organism code
+                               universe = all_entrez,
+                               pAdjustMethod = "BH",
+                               pvalueCutoff = 0.05)
+  
+  write.csv(as.data.frame(ekegg_contracted), 
+            "${OUTPUT_DIR}/cafe/enrichment/E_rhadinum/contracted_KEGG_enrichment.csv")
+}
+EOF
+
+echo "Gene family analysis pipeline completed!"
