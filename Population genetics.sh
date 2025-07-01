@@ -6,27 +6,18 @@ THREADS=16
 GENERATION_TIME=4.5
 MUTATION_RATE=1.9e-8
 
-# Create directories
 mkdir -p {raw_data,aligned,variants,results/{admixture,phylogeny,pca,ld_decay,psmc,fst,introgression}}
 
-# =============================================================================
-# 1. DATA PREPARATION AND ALIGNMENT
-# =============================================================================
+# DATA PREPARATION AND ALIGNMENT
 
-echo "=== Step 1: Data Preparation and Alignment ==="
-
-# Download outgroup data
-echo "Downloading outgroup data..."
 fastq-dump --split-files ${OUTGROUP_SRA} -O raw_data/
 
 # Index reference genome
-echo "Indexing reference genome..."
 bwa index ${REFERENCE_GENOME}
 samtools faidx ${REFERENCE_GENOME}
 gatk CreateSequenceDictionary -R ${REFERENCE_GENOME}
 
 # Align reads using BWA
-echo "Aligning reads to reference genome..."
 for sample in raw_data/*_1.fastq; do
     base=$(basename ${sample} _1.fastq)
     echo "Processing sample: ${base}"
@@ -52,14 +43,8 @@ for sample in raw_data/*_1.fastq; do
     samtools index aligned/${base}.rg.bam
 done
 
-# =============================================================================
-# 2. VARIANT CALLING AND FILTERING
-# =============================================================================
-
-echo "=== Step 2: Variant Calling and Filtering ==="
-
+# VARIANT CALLING AND FILTERING
 # Call variants using GATK HaplotypeCaller
-echo "Calling variants with GATK..."
 for sample in aligned/*.rg.bam; do
     base=$(basename ${sample} .rg.bam)
     echo "Calling variants for: ${base}"
@@ -72,8 +57,6 @@ for sample in aligned/*.rg.bam; do
 done
 
 # Joint genotyping
-echo "Performing joint genotyping..."
-# Create GenomicsDB
 gatk GenomicsDBImport \
     -V variants/*.g.vcf.gz \
     --genomicsdb-workspace-path variants/genomicsdb \
@@ -106,11 +89,7 @@ gatk SelectVariants \
     -O variants/final_snps.vcf.gz \
     --exclude-filtered
 
-# =============================================================================
-# 3. POPULATION STRUCTURE ANALYSIS
-# =============================================================================
-
-echo "=== Step 3: Population Structure Analysis ==="
+# POPULATION STRUCTURE ANALYSIS
 
 # Convert VCF to PLINK format for ADMIXTURE
 vcftools --gzvcf variants/final_snps.vcf.gz \
@@ -132,61 +111,13 @@ done
 grep -h CV *.log > cv_errors.txt
 cd ../../
 
-# =============================================================================
-# 4. PHYLOGENETIC ANALYSIS
-# =============================================================================
-
-echo "=== Step 4: Phylogenetic Analysis ==="
-
-# Convert VCF to phylip format
-python3 << 'EOF'
-import sys
-from Bio import SeqIO
-from Bio.Seq import Seq
-from Bio.SeqRecord import SeqRecord
-import vcf
-
-# Read VCF and convert to phylip format for TreeBest
-vcf_reader = vcf.Reader(open('variants/final_snps.vcf.gz', 'rb'))
-samples = vcf_reader.samples
-
-# Create concatenated sequences for each sample
-sequences = {sample: [] for sample in samples}
-
-for record in vcf_reader:
-    for sample in samples:
-        genotype = record.genotype(sample)
-        if genotype.called:
-            # Convert genotype to nucleotide
-            alleles = [record.REF] + record.ALT
-            gt = genotype['GT'].split('/')
-            if len(gt) == 2:
-                # Take first allele for haploid representation
-                sequences[sample].append(str(alleles[int(gt[0])]))
-            else:
-                sequences[sample].append('N')
-        else:
-            sequences[sample].append('N')
-
-# Write phylip format
-with open('results/phylogeny/alignment.phy', 'w') as f:
-    f.write(f" {len(samples)} {len(sequences[samples[0]])}\n")
-    for sample in samples:
-        f.write(f"{sample:<10} {''.join(sequences[sample])}\n")
-EOF
-
-# Build phylogenetic tree using TreeBest
+# PHYLOGENETIC ANALYSIS
 echo "Building phylogenetic tree..."
 cd results/phylogeny/
 treebest nj -b 1000 alignment.phy > tree_bootstrap.nwk
 cd ../../
 
-# =============================================================================
-# 5. PRINCIPAL COMPONENT ANALYSIS
-# =============================================================================
-
-echo "=== Step 5: Principal Component Analysis ==="
-
+# PRINCIPAL COMPONENT ANALYSIS
 # Convert VCF to GCTA format
 vcftools --gzvcf variants/final_snps.vcf.gz \
     --plink --out results/pca/snps
@@ -201,15 +132,9 @@ gcta64 --bfile results/pca/snps \
 gcta64 --grm results/pca/grm \
     --pca --out results/pca/pca_results
 
-# =============================================================================
-# 6. LINKAGE DISEQUILIBRIUM DECAY ANALYSIS
-# =============================================================================
-
-echo "=== Step 6: Linkage Disequilibrium Decay Analysis ==="
-
+#LINKAGE DISEQUILIBRIUM DECAY ANALYSIS
 # Create population files for each population
 # ErZJ (n=22), ErJH (n=12), ErZS (n=16), ErSA (n=22), EtZJ (n=20), EtPA (n=25)
-
 # Run PopLDdecay for each population
 for pop in ErZJ ErJH ErZS ErSA EtZJ EtPA; do
     echo "Calculating LD decay for population: ${pop}"
@@ -226,12 +151,7 @@ for pop in ErZJ ErJH ErZS ErSA EtZJ EtPA; do
         -OutPrefix ${pop}
 done
 
-# =============================================================================
-# 7. DEMOGRAPHIC HISTORY ANALYSIS
-# =============================================================================
-
-echo "=== Step 7: Demographic History Analysis ==="
-
+#DEMOGRAPHIC HISTORY ANALYSIS
 # PSMC analysis using heterozygous sites for effective population size estimation
 echo "Running PSMC analysis..."
 for sample in aligned/*.rg.bam; do
@@ -320,12 +240,9 @@ for pair in "${!population_pairs[@]}"; do
 done
 
 # Scale results with generation time and create visualizations
-echo "Scaling results and creating visualizations..."
 
 # Plot SMC++ results with spline cubic visualization
 for pop in ErZJ ErJH ErZS ErSA EtZJ EtPA; do
-    echo "Plotting SMC++ results for population: ${pop}"
-    
     smc++ plot \
         --spline cubic \
         --generation-time ${GENERATION_TIME} \
@@ -357,12 +274,7 @@ smc++ plot \
     results/psmc/combined_demographics.pdf \
     ${all_models}
 
-# =============================================================================
-# 8. GENOMIC DIFFERENTIATION ANALYSIS
-# =============================================================================
-
-echo "=== Step 8: Genomic Differentiation Analysis ==="
-
+# GENOMIC DIFFERENTIATION ANALYSIS
 # Calculate FST using sliding windows
 echo "Calculating FST values..."
 vcftools --gzvcf variants/final_snps.vcf.gz \
@@ -377,21 +289,11 @@ python3 << 'EOF'
 import pandas as pd
 import numpy as np
 from scipy import stats
-
-# Read FST results
 fst_data = pd.read_csv('results/fst/ErZJ_vs_EtZJ.windowed.weir.fst', sep='\t')
-
-# Remove rows with NaN FST values
 fst_data = fst_data.dropna(subset=['WEIGHTED_FST'])
-
-# Z-transformation of FST values
 fst_data['FST_Z'] = stats.zscore(fst_data['WEIGHTED_FST'])
-
-# Identify top 1% FST values
 threshold_99 = np.percentile(fst_data['FST_Z'], 99)
 hdrs = fst_data[fst_data['FST_Z'] >= threshold_99]
-
-# Apply FDR correction
 from statsmodels.stats.multitest import multipletests
 _, fdr_pvals, _, _ = multipletests(
     1 - stats.norm.cdf(hdrs['FST_Z']), 
@@ -406,13 +308,10 @@ print(f"Identified {len(hdrs_filtered)} highly differentiated regions")
 EOF
 
 # Calculate additional population genetic statistics for HDRs
-echo "Calculating population genetic statistics..."
-
 # Nucleotide diversity (π) and Tajima's D
 vcftools --gzvcf variants/final_snps.vcf.gz \
     --window-pi 10000 \
     --out results/fst/nucleotide_diversity
-
 vcftools --gzvcf variants/final_snps.vcf.gz \
     --TajimaD 10000 \
     --out results/fst/tajimas_d
@@ -443,15 +342,9 @@ interval -seq results/fst/ldhat_input.seq \
     -its 1000000 -samp 2000 -pen 5 \
     -prefix results/fst/ldhat_output
 
-# =============================================================================
-# 9. INTROGRESSION ANALYSIS
-# =============================================================================
+# INTROGRESSION ANALYSIS
 
-echo "=== Step 9: Introgression Analysis ==="
-
-# Prepare data for introgression analysis
 # Random sampling of 10 individuals per population
-echo "Preparing data for introgression analysis..."
 
 # Create sample lists (10 individuals each)
 for pop in EtZJ EtPA ErZJ; do
@@ -528,100 +421,3 @@ echo "Extracting genes from introgressed regions..."
 bedtools intersect -a genome_annotation.gff3 \
     -b results/introgression/significant_introgression.bed \
     -wa > results/introgression/introgressed_genes.gff3
-
-# =============================================================================
-# 10. FUNCTIONAL ENRICHMENT ANALYSIS
-# =============================================================================
-
-echo "=== Step 10: Functional Enrichment Analysis ==="
-
-# Extract gene IDs from introgressed regions
-grep "gene" results/introgression/introgressed_genes.gff3 | \
-    cut -f9 | sed 's/.*ID=\([^;]*\).*/\1/' > results/introgression/gene_list.txt
-
-# Run GO enrichment analysis (example using topGO in R)
-Rscript << 'EOF'
-library(topGO)
-library(org.Hs.eg.db)  # Replace with appropriate organism database
-
-# Read gene list
-introgressed_genes <- readLines("results/introgression/gene_list.txt")
-
-# Create gene universe (all genes in genome)
-all_genes <- readLines("all_genes.txt")  # You need to create this
-
-# Create named factor for topGO
-geneList <- factor(as.integer(all_genes %in% introgressed_genes))
-names(geneList) <- all_genes
-
-# Create topGO object
-GOdata <- new("topGOdata", 
-              ontology = "BP", 
-              allGenes = geneList,
-              geneSel = function(x) x == 1,
-              description = "Introgressed genes",
-              annot = annFUN.org, 
-              mapping = "org.Hs.eg.db")
-
-# Run enrichment test
-resultFisher <- runTest(GOdata, algorithm = "classic", statistic = "fisher")
-
-# Get results
-allRes <- GenTable(GOdata, classicFisher = resultFisher, 
-                   orderBy = "classicFisher", ranksOf = "classicFisher", 
-                   topNodes = 50)
-
-# Save results
-write.csv(allRes, "results/introgression/GO_enrichment.csv", row.names = FALSE)
-EOF
-
-# Run KEGG pathway analysis
-python3 << 'EOF'
-# This is a placeholder for KEGG analysis
-# You would typically use tools like DAVID, Enrichr, or custom scripts
-# with KEGG API to perform pathway enrichment analysis
-
-import requests
-import json
-
-def kegg_enrichment(gene_list, organism='hsa'):
-    """
-    Placeholder function for KEGG pathway enrichment
-    Replace with actual KEGG analysis implementation
-    """
-    print("Running KEGG pathway enrichment analysis...")
-    print(f"Analyzing {len(gene_list)} genes for organism: {organism}")
-    
-    # Implement actual KEGG analysis here
-    # This might involve:
-    # 1. Converting gene IDs to KEGG format
-    # 2. Querying KEGG database
-    # 3. Statistical testing for enrichment
-    # 4. Multiple testing correction
-    
-    # Save results
-    results = {
-        'pathways': ['example_pathway_1', 'example_pathway_2'],
-        'p_values': [0.001, 0.005],
-        'gene_counts': [15, 8]
-    }
-    
-    with open('results/introgression/KEGG_enrichment.json', 'w') as f:
-        json.dump(results, f, indent=2)
-
-# Read gene list
-with open('results/introgression/gene_list.txt', 'r') as f:
-    genes = [line.strip() for line in f]
-
-kegg_enrichment(genes)
-EOF
-
-echo "=== Analysis Pipeline Complete ==="
-echo "Results are available in the results/ directory:"
-echo "- results/admixture/: Population structure analysis"
-echo "- results/phylogeny/: Phylogenetic tree"
-echo "- results/pca/: Principal component analysis"
-echo "- results/ld_decay/: Linkage disequilibrium decay"
-echo "- results/psmc/: Demographic history"
-echo "- results/fst/: Genomic differentiation"
-echo "- results/introgression/: Introgression analysis and functional enrichment"
